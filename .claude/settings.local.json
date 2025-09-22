@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir:*)",
+      "Bash(python:*)",
+      "Bash(where python)",
+      "Bash(pip --version)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
