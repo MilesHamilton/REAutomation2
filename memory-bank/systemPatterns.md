@@ -31,7 +31,9 @@
 2. **BaseAgent**: Abstract base class for all conversation agents
 3. **Voice Pipeline**: Pipecat-based real-time audio processing
 4. **LLM Service**: Ollama client for local language model inference
-5. **Cost Controller**: Budget and spending limit enforcement
+5. **Cost Control System**: Comprehensive budget management with real-time alerts
+6. **LangSmith Monitoring**: Production-ready monitoring with circuit breaker protection
+7. **Integration Services**: Google Sheets, CRM, and external API connectors
 
 #### Agent Hierarchy
 

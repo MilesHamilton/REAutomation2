@@ -13,6 +13,7 @@
 
 - **LangChain 0.1.0**: Framework for developing applications with language models
 - **LangGraph 0.0.25**: Library for building stateful, multi-actor applications with LLMs
+- **LangSmith**: Production monitoring and tracing for LangChain applications
 - **Ollama**: Local LLM inference server (Llama 3.1 8B model)
 - **OpenAI Whisper 20231117**: Automatic speech recognition system
 

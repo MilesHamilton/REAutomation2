@@ -4,7 +4,13 @@
       "Bash(mkdir:*)",
       "Bash(python:*)",
       "Bash(where python)",
-      "Bash(pip --version)"
+      "Bash(pip --version)",
+      "Bash(find:*)",
+      "Bash(py -m flake8:*)",
+      "Bash(py -m py_compile:*)",
+      "Bash(./.venv/Scripts/python.exe -m py_compile:*)",
+      "Bash(cat:*)",
+      "Bash(alembic revision:*)"
     ],
     "deny": [],
     "ask": []

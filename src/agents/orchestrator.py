@@ -14,6 +14,7 @@ from .qualification_agent import QualificationAgent
 from .objection_handler import ObjectionHandlerAgent
 from .scheduler_agent import SchedulerAgent
 from .analytics_agent import AnalyticsAgent
+from ..monitoring.tracing import trace_workflow, trace_agent_execution
 
 logger = logging.getLogger(__name__)
 

@@ -1,9 +1,11 @@
-from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect, Request, Form, Response
+from fastapi.responses import PlainTextResponse
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 import uuid
 import time
 import json
+import logging
 
 from ...config import settings
 from ...voice.pipeline import VoicePipeline
@@ -11,6 +13,7 @@ from ...voice.models import TTSProvider, VoiceCallState
 from ...agents.orchestrator import agent_orchestrator
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class CallStartRequest(BaseModel):
@@ -339,10 +342,85 @@ async def generate_twiml(call_id: str):
     # Generate TwiML that connects to our WebSocket
     twiml_response = voice_pipeline.twilio_integration.generate_twiml_response(call_id)
 
-    return {
-        "content": twiml_response,
-        "media_type": "application/xml"
-    }
+    return PlainTextResponse(content=twiml_response, media_type="application/xml")
+
+
+@router.websocket("/twilio/ws/{call_id}")
+async def handle_twilio_websocket(websocket: WebSocket, call_id: str):
+    """
+    Handle Twilio WebSocket for Pipecat real-time audio streaming
+    """
+    await websocket.accept()
+
+    try:
+        logger.info(f"Twilio WebSocket connected for call {call_id}")
+
+        # Start Pipecat pipeline with Twilio stream
+        if voice_pipeline.use_pipecat:
+            # This will be the stream SID from Twilio
+            twilio_stream_sid = call_id  # In practice, this would be extracted from Twilio
+
+            # Start pipeline if not already started
+            if call_id not in voice_pipeline.active_calls:
+                # Extract phone number from active_calls data
+                call_data = active_calls.get(call_id, {})
+                phone_number = call_data.get("phone_number", "unknown")
+                lead_data = call_data.get("lead_data", {})
+
+                await voice_pipeline.start_call(
+                    call_id=call_id,
+                    phone_number=phone_number,
+                    lead_data=lead_data,
+                    twilio_stream_sid=twilio_stream_sid
+                )
+
+        # Handle WebSocket messages from Twilio
+        while True:
+            try:
+                message = await websocket.receive_text()
+                data = json.loads(message)
+                event = data.get("event")
+
+                if event == "connected":
+                    logger.info(f"Twilio stream connected for call {call_id}")
+                    await websocket.send_text(json.dumps({
+                        "event": "connected",
+                        "protocol": "Call"
+                    }))
+
+                elif event == "start":
+                    logger.info(f"Twilio stream started for call {call_id}")
+                    # Update call status
+                    if call_id in active_calls:
+                        active_calls[call_id]["status"] = "in_progress"
+
+                elif event == "media":
+                    # Audio data from caller - forward to Pipecat pipeline
+                    media_data = data.get("media", {})
+                    # Pipecat pipeline will handle this internally
+                    pass
+
+                elif event == "stop":
+                    logger.info(f"Twilio stream stopped for call {call_id}")
+                    break
+
+            except WebSocketDisconnect:
+                logger.info(f"Twilio WebSocket disconnected for call {call_id}")
+                break
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid JSON from Twilio WebSocket for call {call_id}: {e}")
+                continue
+            except Exception as e:
+                logger.error(f"Error processing Twilio WebSocket message for call {call_id}: {e}")
+                continue
+
+    except Exception as e:
+        logger.error(f"Error in Twilio WebSocket handler for call {call_id}: {e}")
+    finally:
+        # Cleanup call
+        if call_id in active_calls:
+            await voice_pipeline.end_call(call_id, "websocket_disconnect")
+        await websocket.close()
 
 
 @router.post("/twilio/status/{call_id}")

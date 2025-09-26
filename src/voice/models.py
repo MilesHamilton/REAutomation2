@@ -120,6 +120,18 @@ class CallSession(BaseModel):
     error_message: Optional[str] = None
 
 
+class VoicePipelineConfig(BaseModel):
+    """Configuration for voice pipeline"""
+    audio_config: AudioConfig = Field(default_factory=AudioConfig)
+    tts_provider: TTSProvider = TTSProvider.LOCAL_PIPER
+    stt_provider: str = Field(default="whisper-local")
+    llm_model: str = Field(default="llama3.1:8b")
+    tier_escalation_threshold: float = Field(default=0.7)
+    max_call_duration_minutes: int = Field(default=30)
+    enable_cost_tracking: bool = Field(default=True)
+    enable_analytics: bool = Field(default=True)
+
+
 class TierSwitchEvent(BaseModel):
     call_id: str
     from_tier: TTSProvider

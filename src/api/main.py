@@ -7,8 +7,11 @@ from fastapi.responses import JSONResponse
 
 from ..config import settings
 from ..llm import llm_service
-from .routers import llm, health, calls, integrations
+from .routers import llm, health, calls, integrations, monitoring
 from .middleware import RequestLoggingMiddleware, MetricsMiddleware
+from ..monitoring.performance import performance_monitor
+from ..monitoring.alerts import alert_manager
+from ..monitoring.dashboard import dashboard_manager
 
 # Configure logging
 logging.basicConfig(level=settings.log_level)
@@ -26,6 +29,18 @@ async def lifespan(app: FastAPI):
         logger.error("Failed to initialize LLM service")
         raise RuntimeError("LLM service initialization failed")
 
+    # Initialize monitoring systems
+    try:
+        logger.info("Initializing monitoring systems...")
+        await performance_monitor.initialize()
+        await alert_manager.initialize()
+        await dashboard_manager.start_real_time_updates()
+        logger.info("Monitoring systems initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize monitoring systems: {e}")
+        # Don't fail the entire startup if monitoring fails
+        pass
+
     logger.info("All services started successfully")
 
     yield
@@ -33,6 +48,16 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down services...")
     await llm_service.shutdown()
+
+    # Shutdown monitoring systems
+    try:
+        logger.info("Shutting down monitoring systems...")
+        await performance_monitor.shutdown()
+        await alert_manager.shutdown()
+        logger.info("Monitoring systems shutdown complete")
+    except Exception as e:
+        logger.error(f"Error shutting down monitoring systems: {e}")
+
     logger.info("Shutdown complete")
 
 
@@ -65,6 +90,7 @@ app.include_router(health.router, prefix="/health", tags=["health"])
 app.include_router(llm.router, prefix="/llm", tags=["llm"])
 app.include_router(calls.router, prefix="/calls", tags=["calls"])
 app.include_router(integrations.router, tags=["integrations"])
+app.include_router(monitoring.router, prefix="/monitoring", tags=["monitoring"])
 
 
 @app.get("/")

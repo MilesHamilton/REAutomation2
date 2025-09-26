@@ -6,8 +6,8 @@ from typing import Optional, Dict, Any, Union
 import asyncio
 from dataclasses import dataclass
 
-import aioredis
-from aioredis import Redis
+import redis.asyncio as aioredis
+from redis.asyncio import Redis
 
 from ..config import settings
 from .models import LLMRequest, LLMResponse

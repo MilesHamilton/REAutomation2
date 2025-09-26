@@ -58,6 +58,15 @@ class Settings(BaseSettings):
     output_spreadsheet_id: Optional[str] = Field(default=None, env="OUTPUT_SPREADSHEET_ID")
     sheets_enabled: bool = Field(default=True, env="SHEETS_ENABLED")
 
+    # LangSmith Monitoring Configuration
+    langsmith_api_key: Optional[str] = Field(default=None, env="LANGSMITH_API_KEY")
+    langsmith_project: str = Field(default="reautomation2", env="LANGSMITH_PROJECT")
+    langsmith_endpoint: str = Field(default="https://api.smith.langchain.com", env="LANGSMITH_ENDPOINT")
+    langsmith_enabled: bool = Field(default=True, env="LANGSMITH_ENABLED")
+    langsmith_batch_size: int = Field(default=100, env="LANGSMITH_BATCH_SIZE")
+    langsmith_flush_interval: int = Field(default=30, env="LANGSMITH_FLUSH_INTERVAL")
+    langsmith_fallback_enabled: bool = Field(default=True, env="LANGSMITH_FALLBACK_ENABLED")
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

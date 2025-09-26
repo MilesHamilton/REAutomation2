@@ -13,15 +13,23 @@ from .models import (
 from .tts_manager import TTSManager
 from .stt_service import STTService
 from .twilio_integration import TwilioIntegration
+from .pipecat_integration import pipecat_pipeline
 
 logger = logging.getLogger(__name__)
 
 
 class VoicePipeline:
-    def __init__(self):
+    def __init__(self, use_pipecat: bool = True):
+        self.use_pipecat = use_pipecat
+
+        # Initialize all components for compatibility
         self.tts_manager = TTSManager()
         self.stt_service = STTService()
         self.twilio_integration = TwilioIntegration()
+
+        if use_pipecat:
+            # Use Pipecat for real-time processing
+            self.pipecat_pipeline = pipecat_pipeline
 
         self.active_calls: Dict[str, CallSession] = {}
         self.is_initialized = False
@@ -35,20 +43,29 @@ class VoicePipeline:
     async def initialize(self):
         """Initialize all voice processing components"""
         try:
-            logger.info("Initializing Voice Pipeline...")
+            logger.info(f"Initializing Voice Pipeline (Pipecat: {self.use_pipecat})...")
 
-            # Initialize components in parallel
-            init_tasks = [
-                self.tts_manager.initialize(),
-                self.stt_service.initialize(),
-                self.twilio_integration.initialize()
-            ]
+            if self.use_pipecat:
+                # Initialize Pipecat pipeline and Twilio
+                init_tasks = [
+                    self.pipecat_pipeline.initialize(),
+                    self.twilio_integration.initialize()
+                ]
+                components = ["Pipecat Pipeline", "Twilio Integration"]
+            else:
+                # Initialize legacy components
+                init_tasks = [
+                    self.tts_manager.initialize(),
+                    self.stt_service.initialize(),
+                    self.twilio_integration.initialize()
+                ]
+                components = ["TTS Manager", "STT Service", "Twilio Integration"]
 
             results = await asyncio.gather(*init_tasks, return_exceptions=True)
 
             # Check results
             for i, result in enumerate(results):
-                component = ["TTS Manager", "STT Service", "Twilio Integration"][i]
+                component = components[i]
                 if isinstance(result, Exception):
                     logger.error(f"{component} initialization failed: {result}")
                     return False
@@ -69,7 +86,8 @@ class VoicePipeline:
         call_id: str,
         phone_number: str,
         lead_data: Optional[Dict[str, Any]] = None,
-        initial_tier: TTSProvider = TTSProvider.LOCAL_PIPER
+        initial_tier: TTSProvider = TTSProvider.LOCAL_PIPER,
+        twilio_stream_sid: Optional[str] = None
     ) -> bool:
         """Start a new voice call"""
         try:
@@ -81,49 +99,93 @@ class VoicePipeline:
                 logger.error(f"Call {call_id} already active")
                 return False
 
-            # Create call session
-            tts_config = TTSConfig(provider=initial_tier)
-            metrics = VoiceMetrics(call_id=call_id)
+            if self.use_pipecat:
+                # Use Pipecat pipeline for real-time processing
+                if not twilio_stream_sid:
+                    logger.error("Twilio stream SID required for Pipecat pipeline")
+                    return False
 
-            session = CallSession(
-                call_id=call_id,
-                phone_number=phone_number,
-                current_tier=initial_tier,
-                tts_config=tts_config,
-                metrics=metrics,
-                lead_data=lead_data or {}
-            )
+                success = await self.pipecat_pipeline.start_call(
+                    call_id=call_id,
+                    phone_number=phone_number,
+                    twilio_stream_sid=twilio_stream_sid,
+                    lead_data=lead_data,
+                    initial_tier=initial_tier
+                )
 
-            self.active_calls[call_id] = session
+                if success:
+                    # Get session from Pipecat pipeline
+                    session = self.pipecat_pipeline.get_call_session(call_id)
+                    if session:
+                        self.active_calls[call_id] = session
 
-            # Initiate call through Twilio
-            call_started = await self.twilio_integration.start_call(
-                call_id=call_id,
-                phone_number=phone_number
-            )
+                        # Set up callbacks
+                        self.pipecat_pipeline.on_call_started(self._on_call_started)
+                        self.pipecat_pipeline.on_call_ended(self._on_call_ended)
+                        self.pipecat_pipeline.on_tier_switched(self._on_tier_switched)
+                        self.pipecat_pipeline.on_transcript(self._on_transcript)
 
-            if call_started:
-                session.state = VoiceCallState.RINGING
-                session.started_at = time.time()
+                        logger.info(f"Pipecat call {call_id} started successfully")
+                        return True
 
-                # Set up audio processing pipeline
-                await self._setup_audio_pipeline(session)
-
-                if self._on_call_started:
-                    self._on_call_started(session)
-
-                logger.info(f"Call {call_id} started successfully")
-                return True
-            else:
-                # Remove failed call
-                del self.active_calls[call_id]
-                logger.error(f"Failed to start call {call_id}")
+                logger.error(f"Failed to start Pipecat call {call_id}")
                 return False
+
+            else:
+                # Use legacy pipeline
+                return await self._start_call_legacy(call_id, phone_number, lead_data, initial_tier)
 
         except Exception as e:
             logger.error(f"Error starting call {call_id}: {e}")
             if call_id in self.active_calls:
                 del self.active_calls[call_id]
+            return False
+
+    async def _start_call_legacy(
+        self,
+        call_id: str,
+        phone_number: str,
+        lead_data: Optional[Dict[str, Any]] = None,
+        initial_tier: TTSProvider = TTSProvider.LOCAL_PIPER
+    ) -> bool:
+        """Start call using legacy components"""
+        # Create call session
+        tts_config = TTSConfig(provider=initial_tier)
+        metrics = VoiceMetrics(call_id=call_id)
+
+        session = CallSession(
+            call_id=call_id,
+            phone_number=phone_number,
+            current_tier=initial_tier,
+            tts_config=tts_config,
+            metrics=metrics,
+            lead_data=lead_data or {}
+        )
+
+        self.active_calls[call_id] = session
+
+        # Initiate call through Twilio
+        call_started = await self.twilio_integration.start_call(
+            call_id=call_id,
+            phone_number=phone_number
+        )
+
+        if call_started:
+            session.state = VoiceCallState.RINGING
+            session.started_at = time.time()
+
+            # Set up audio processing pipeline
+            await self._setup_audio_pipeline(session)
+
+            if self._on_call_started:
+                self._on_call_started(session)
+
+            logger.info(f"Legacy call {call_id} started successfully")
+            return True
+        else:
+            # Remove failed call
+            del self.active_calls[call_id]
+            logger.error(f"Failed to start legacy call {call_id}")
             return False
 
     async def _setup_audio_pipeline(self, session: CallSession):
@@ -285,48 +347,62 @@ class VoicePipeline:
                 logger.error(f"Call {call_id} not found for tier switch")
                 return False
 
-            session = self.active_calls[call_id]
-            old_tier = session.current_tier
-
-            if old_tier == new_tier:
-                logger.info(f"Call {call_id} already on tier {new_tier}")
-                return True
-
-            session.state = VoiceCallState.TIER_SWITCHING
-
-            # Update TTS configuration
-            new_config = TTSConfig(provider=new_tier)
-            if new_tier == TTSProvider.ELEVENLABS:
-                new_config.voice_id = settings.elevenlabs_voice
-
-            success = await self.tts_manager.switch_tier(call_id, old_tier, new_tier)
-
-            if success:
-                session.current_tier = new_tier
-                session.tts_config = new_config
-                session.metrics.tier_switches += 1
-
-                # Create tier switch event
-                switch_event = TierSwitchEvent(
-                    call_id=call_id,
-                    from_tier=old_tier,
-                    to_tier=new_tier,
-                    trigger=trigger,
-                    qualification_score=session.metrics.qualification_score
-                )
-
-                if self._on_tier_switched:
-                    self._on_tier_switched(switch_event)
-
-                logger.info(f"Call {call_id}: Tier switched from {old_tier} to {new_tier}")
-                session.state = VoiceCallState.CONNECTED
-                return True
+            if self.use_pipecat:
+                # Use Pipecat tier switching
+                return await self.pipecat_pipeline.switch_tier(call_id, new_tier, trigger)
             else:
-                session.state = VoiceCallState.CONNECTED
-                return False
+                # Use legacy tier switching
+                return await self._switch_tier_legacy(call_id, new_tier, trigger)
 
         except Exception as e:
             logger.error(f"Error switching tier for call {call_id}: {e}")
+            return False
+
+    async def _switch_tier_legacy(
+        self,
+        call_id: str,
+        new_tier: TTSProvider,
+        trigger: str = "manual"
+    ) -> bool:
+        """Legacy tier switching implementation"""
+        session = self.active_calls[call_id]
+        old_tier = session.current_tier
+
+        if old_tier == new_tier:
+            logger.info(f"Call {call_id} already on tier {new_tier}")
+            return True
+
+        session.state = VoiceCallState.TIER_SWITCHING
+
+        # Update TTS configuration
+        new_config = TTSConfig(provider=new_tier)
+        if new_tier == TTSProvider.ELEVENLABS:
+            new_config.voice_id = settings.elevenlabs_voice
+
+        success = await self.tts_manager.switch_tier(call_id, old_tier, new_tier)
+
+        if success:
+            session.current_tier = new_tier
+            session.tts_config = new_config
+            session.metrics.tier_switches += 1
+
+            # Create tier switch event
+            switch_event = TierSwitchEvent(
+                call_id=call_id,
+                from_tier=old_tier,
+                to_tier=new_tier,
+                trigger=trigger,
+                qualification_score=session.metrics.qualification_score
+            )
+
+            if self._on_tier_switched:
+                self._on_tier_switched(switch_event)
+
+            logger.info(f"Call {call_id}: Tier switched from {old_tier} to {new_tier}")
+            session.state = VoiceCallState.CONNECTED
+            return True
+        else:
+            session.state = VoiceCallState.CONNECTED
             return False
 
     async def _handle_outgoing_audio(self, session: CallSession):
@@ -342,30 +418,42 @@ class VoicePipeline:
                 logger.warning(f"Call {call_id} not found for ending")
                 return False
 
-            session = self.active_calls[call_id]
-            session.state = VoiceCallState.ENDED
-            session.ended_at = time.time()
-
-            # Calculate final metrics
-            if session.started_at:
-                session.metrics.total_audio_duration_ms = (session.ended_at - session.started_at) * 1000
-
-            # End call through Twilio
-            await self.twilio_integration.end_call(call_id)
-
-            # Trigger callback
-            if self._on_call_ended:
-                self._on_call_ended(session, reason)
-
-            # Remove from active calls
-            del self.active_calls[call_id]
-
-            logger.info(f"Call {call_id} ended: {reason}")
-            return True
+            if self.use_pipecat:
+                # Use Pipecat end call
+                success = await self.pipecat_pipeline.end_call(call_id, reason)
+                if success and call_id in self.active_calls:
+                    del self.active_calls[call_id]
+                return success
+            else:
+                # Use legacy end call
+                return await self._end_call_legacy(call_id, reason)
 
         except Exception as e:
             logger.error(f"Error ending call {call_id}: {e}")
             return False
+
+    async def _end_call_legacy(self, call_id: str, reason: str = "completed") -> bool:
+        """Legacy end call implementation"""
+        session = self.active_calls[call_id]
+        session.state = VoiceCallState.ENDED
+        session.ended_at = time.time()
+
+        # Calculate final metrics
+        if session.started_at:
+            session.metrics.total_audio_duration_ms = (session.ended_at - session.started_at) * 1000
+
+        # End call through Twilio
+        await self.twilio_integration.end_call(call_id)
+
+        # Trigger callback
+        if self._on_call_ended:
+            self._on_call_ended(session, reason)
+
+        # Remove from active calls
+        del self.active_calls[call_id]
+
+        logger.info(f"Call {call_id} ended: {reason}")
+        return True
 
     def get_call_session(self, call_id: str) -> Optional[CallSession]:
         """Get call session by ID"""
@@ -431,12 +519,19 @@ class VoicePipeline:
             for call_id in list(self.active_calls.keys()):
                 await self.end_call(call_id, "shutdown")
 
-            # Clean up components
-            cleanup_tasks = [
-                self.tts_manager.cleanup(),
-                self.stt_service.cleanup(),
-                self.twilio_integration.cleanup()
-            ]
+            if self.use_pipecat:
+                # Clean up Pipecat components
+                cleanup_tasks = [
+                    self.pipecat_pipeline.cleanup(),
+                    self.twilio_integration.cleanup()
+                ]
+            else:
+                # Clean up legacy components
+                cleanup_tasks = [
+                    self.tts_manager.cleanup(),
+                    self.stt_service.cleanup(),
+                    self.twilio_integration.cleanup()
+                ]
 
             await asyncio.gather(*cleanup_tasks, return_exceptions=True)
 
