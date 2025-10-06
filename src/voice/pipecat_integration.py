@@ -73,7 +73,12 @@ logger = logging.getLogger(__name__)
 class ConversationProcessor(FrameProcessor):
     """Custom processor for handling LLM conversation flow"""
 
-    def __init__(self, call_session: CallSession, on_response_generated: Optional[Callable] = None):
+    def __init__(
+        self,
+        call_session: CallSession,
+        on_response_generated: Optional[Callable] = None,
+        agent_orchestrator: Optional[Any] = None
+    ):
         super().__init__()
         self.call_session = call_session
         self.conversation_context = ConversationContext(
@@ -82,6 +87,8 @@ class ConversationProcessor(FrameProcessor):
         )
         self.on_response_generated = on_response_generated
         self._processing = False
+        self.agent_orchestrator = agent_orchestrator
+        self.fallback_mode = False
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -104,40 +111,98 @@ class ConversationProcessor(FrameProcessor):
             # Update call session state
             self.call_session.state = VoiceCallState.PROCESSING
 
-            # Generate LLM response
-            llm_start_time = time.time()
-            llm_response = await llm_service.generate_response(
-                context=self.conversation_context,
-                user_input=user_text
-            )
-            llm_processing_time = (time.time() - llm_start_time) * 1000
+            response_text = None
+            start_time = time.time()
 
-            if llm_response and llm_response.content:
+            # Try agent orchestration first if enabled and available
+            if self.agent_orchestrator and not self.fallback_mode:
+                try:
+                    agent_response = await asyncio.wait_for(
+                        self.agent_orchestrator.process_voice_input(
+                            call_id=self.call_session.call_id,
+                            user_input=user_text,
+                            lead_data=self.call_session.lead_data
+                        ),
+                        timeout=0.5  # 500ms timeout for agent processing
+                    )
+
+                    if agent_response and agent_response.response_text:
+                        response_text = agent_response.response_text
+
+                        # Update call session with agent info
+                        self.call_session.current_agent = agent_response.agent_type.value
+                        await self._sync_workflow_state()
+
+                        # Check for tier escalation from agent
+                        if agent_response.should_escalate_tier:
+                            await self._check_tier_escalation()
+
+                        logger.debug(
+                            f"Call {self.call_session.call_id} - Agent response from {agent_response.agent_type}"
+                        )
+
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"Call {self.call_session.call_id} - Agent processing timeout, falling back to direct LLM"
+                    )
+                    self.fallback_mode = True
+
+                except Exception as e:
+                    logger.error(
+                        f"Call {self.call_session.call_id} - Agent orchestration error: {e}, "
+                        f"falling back to direct LLM"
+                    )
+                    self.fallback_mode = True
+
+            # Fallback to direct LLM if agent orchestration failed or disabled
+            if not response_text:
+                llm_response = await llm_service.generate_response(
+                    context=self.conversation_context,
+                    user_input=user_text
+                )
+
+                if llm_response and llm_response.content:
+                    response_text = llm_response.content
+                    logger.debug(f"Call {self.call_session.call_id} - Using direct LLM response")
+
+            processing_time = (time.time() - start_time) * 1000
+
+            if response_text:
                 # Update conversation context
                 self.conversation_context.messages.extend([
                     Message(role=MessageRole.USER, content=user_text),
-                    Message(role=MessageRole.ASSISTANT, content=llm_response.content)
+                    Message(role=MessageRole.ASSISTANT, content=response_text)
                 ])
 
                 # Update metrics
-                self.call_session.metrics.llm_latency_ms = llm_processing_time
+                self.call_session.metrics.llm_latency_ms = processing_time
 
                 # Generate TTS response
-                await self.push_frame(TextFrame(text=llm_response.content))
+                await self.push_frame(TextFrame(text=response_text))
 
                 # Callback for response tracking
                 if self.on_response_generated:
-                    await self.on_response_generated(user_text, llm_response.content)
+                    await self.on_response_generated(user_text, response_text)
 
-                # Check for tier escalation
-                await self._check_tier_escalation()
-
-                logger.info(f"Call {self.call_session.call_id} - Response: {llm_response.content[:50]}...")
+                logger.info(f"Call {self.call_session.call_id} - Response: {response_text[:50]}...")
 
         except Exception as e:
             logger.error(f"Error processing user input for call {self.call_session.call_id}: {e}")
             self.call_session.state = VoiceCallState.ERROR
             self.call_session.error_message = str(e)
+
+    async def _sync_workflow_state(self):
+        """Synchronize workflow state with call session"""
+        try:
+            if self.agent_orchestrator:
+                context = self.agent_orchestrator.get_context(self.call_session.call_id)
+                if context:
+                    self.call_session.workflow_context_id = context.call_id
+                    self.call_session.workflow_state = context.workflow_state.value
+                    self.call_session.last_state_sync = time.time()
+
+        except Exception as e:
+            logger.error(f"Error syncing workflow state for call {self.call_session.call_id}: {e}")
 
     async def _check_tier_escalation(self):
         """Check if call should be escalated to premium tier"""
@@ -163,16 +228,18 @@ class ConversationProcessor(FrameProcessor):
 class PipecatVoicePipeline:
     """Pipecat-based real-time voice pipeline with Twilio integration"""
 
-    def __init__(self, config: Optional[VoicePipelineConfig] = None):
+    def __init__(self, config: Optional[VoicePipelineConfig] = None, enable_agent_integration: bool = True):
         self.config = config or VoicePipelineConfig()
         self.active_pipelines: Dict[str, Pipeline] = {}
         self.active_tasks: Dict[str, PipelineTask] = {}
         self.call_sessions: Dict[str, CallSession] = {}
         self.is_initialized = False
+        self.enable_agent_integration = enable_agent_integration
 
         # Services
         self.whisper_stt: Optional[WhisperSTTService] = None
         self.vad_analyzer: Optional[SileroVADAnalyzer] = None
+        self.agent_orchestrator: Optional[Any] = None
 
         # Callbacks
         self._on_call_started: Optional[Callable] = None
@@ -196,6 +263,16 @@ class PipecatVoicePipeline:
                 sample_rate=16000,
                 min_volume=0.6
             )
+
+            # Initialize agent orchestrator if enabled
+            if self.enable_agent_integration:
+                from ..agents.orchestrator import agent_orchestrator
+                self.agent_orchestrator = agent_orchestrator
+
+                if not self.agent_orchestrator.is_initialized:
+                    await self.agent_orchestrator.initialize()
+
+                logger.info("Agent orchestration enabled for voice pipeline")
 
             # Test services
             await self.whisper_stt.start()
@@ -252,10 +329,11 @@ class PipecatVoicePipeline:
             # Create TTS service based on tier
             tts_service = await self._create_tts_service(initial_tier)
 
-            # Create conversation processor
+            # Create conversation processor with agent orchestration
             conversation_processor = ConversationProcessor(
                 call_session=session,
-                on_response_generated=self._on_response_generated
+                on_response_generated=self._on_response_generated,
+                agent_orchestrator=self.agent_orchestrator if self.enable_agent_integration else None
             )
 
             # Build pipeline

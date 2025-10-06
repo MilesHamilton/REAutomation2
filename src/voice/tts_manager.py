@@ -5,11 +5,13 @@ import time
 import subprocess
 import tempfile
 import os
+import numpy as np
 from typing import Optional, Dict, Any
 from pathlib import Path
 
 from ..config import settings
 from .models import TTSRequest, TTSResponse, TTSProvider, TTSConfig
+from .piper_integration import PiperEngine, PIPER_AVAILABLE
 
 logger = logging.getLogger(__name__)
 
@@ -45,23 +47,35 @@ class TTSManager:
     async def _initialize_piper(self):
         """Initialize Piper TTS"""
         try:
-            # Check if Piper is available
-            result = subprocess.run(
-                ["piper", "--help"],
-                capture_output=True,
-                text=True,
-                timeout=10
+            if not PIPER_AVAILABLE:
+                logger.warning("Piper TTS library not available")
+                self._providers[TTSProvider.LOCAL_PIPER] = {"available": False}
+                return
+
+            # Initialize PiperEngine
+            piper_engine = PiperEngine(
+                models_path=settings.piper_models_path,
+                default_voice=settings.piper_default_voice,
+                use_gpu=settings.piper_use_gpu,
+                prewarm=settings.piper_prewarm_model,
+                speaker_id=settings.piper_speaker_id
             )
 
-            if result.returncode == 0:
+            # Initialize the engine
+            success = await piper_engine.initialize()
+
+            if success:
+                available_voices = piper_engine.get_available_voices()
                 self._providers[TTSProvider.LOCAL_PIPER] = {
                     "available": True,
-                    "models_path": "models/piper/",
-                    "default_voice": "en_US-lessac-medium.onnx"
+                    "engine": piper_engine,
+                    "voices": available_voices,
+                    "default_voice": settings.piper_default_voice
                 }
-                logger.info("Piper TTS initialized")
+                logger.info(f"Piper TTS initialized with {len(available_voices)} voices")
             else:
-                logger.warning("Piper TTS not available")
+                logger.warning("Piper engine initialization failed")
+                self._providers[TTSProvider.LOCAL_PIPER] = {"available": False}
 
         except Exception as e:
             logger.warning(f"Piper TTS initialization failed: {e}")
@@ -171,50 +185,77 @@ class TTSManager:
         """Synthesize using Piper TTS"""
         try:
             provider_info = self._providers[TTSProvider.LOCAL_PIPER]
-            voice_file = request.config.voice_id or provider_info["default_voice"]
-            models_path = Path(provider_info["models_path"])
-            voice_path = models_path / voice_file
+            piper_engine: PiperEngine = provider_info["engine"]
 
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as text_file:
-                text_file.write(request.text)
-                text_file_path = text_file.name
+            # Get voice name
+            voice_name = request.config.voice_id or provider_info["default_voice"]
 
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as audio_file:
-                audio_file_path = audio_file.name
-
-            # Run Piper synthesis
-            cmd = [
-                "piper",
-                "--model", str(voice_path),
-                "--output_file", audio_file_path,
-                text_file_path
-            ]
-
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+            # Synthesize using PiperEngine
+            audio_array = await piper_engine.synthesize(
+                text=request.text,
+                voice_name=voice_name
             )
 
-            stdout, stderr = await process.communicate()
-
-            if process.returncode == 0:
-                with open(audio_file_path, 'rb') as f:
-                    audio_data = f.read()
-
-                # Cleanup temp files
-                os.unlink(text_file_path)
-                os.unlink(audio_file_path)
-
-                return audio_data
-
-            else:
-                logger.error(f"Piper synthesis failed: {stderr.decode()}")
+            if audio_array is None:
+                logger.error("Piper synthesis returned None")
                 return None
+
+            # Convert numpy array to PCM bytes
+            audio_bytes = self._numpy_to_pcm_bytes(audio_array)
+
+            # Wrap in WAV format for compatibility
+            audio_wav = self._wrap_pcm_in_wav(
+                audio_bytes,
+                sample_rate=piper_engine.get_sample_rate(voice_name),
+                channels=1,
+                bit_depth=16
+            )
+
+            return audio_wav
 
         except Exception as e:
             logger.error(f"Piper synthesis error: {e}")
             return None
+
+    def _numpy_to_pcm_bytes(self, audio_array: np.ndarray) -> bytes:
+        """Convert numpy float32 array to 16-bit PCM bytes"""
+        if audio_array.dtype != np.float32:
+            audio_array = audio_array.astype(np.float32)
+
+        # Clip to prevent overflow
+        audio_array = np.clip(audio_array, -1.0, 1.0)
+
+        # Convert to 16-bit signed integers
+        audio_int16 = (audio_array * 32767).astype(np.int16)
+        return audio_int16.tobytes()
+
+    def _wrap_pcm_in_wav(self, pcm_data: bytes, sample_rate: int, channels: int, bit_depth: int) -> bytes:
+        """Wrap raw PCM data in WAV container"""
+        import struct
+
+        # Calculate sizes
+        data_size = len(pcm_data)
+        file_size = 36 + data_size
+
+        # Create WAV header
+        wav_header = struct.pack(
+            '<4sI4s4sIHHIIHH4sI',
+            b'RIFF',           # ChunkID
+            file_size,         # ChunkSize
+            b'WAVE',           # Format
+            b'fmt ',           # Subchunk1ID
+            16,                # Subchunk1Size (PCM)
+            1,                 # AudioFormat (PCM)
+            channels,          # NumChannels
+            sample_rate,       # SampleRate
+            sample_rate * channels * bit_depth // 8,  # ByteRate
+            channels * bit_depth // 8,  # BlockAlign
+            bit_depth,         # BitsPerSample
+            b'data',           # Subchunk2ID
+            data_size          # Subchunk2Size
+        )
+
+        return wav_header + pcm_data
 
     async def _synthesize_coqui(self, request: TTSRequest) -> Optional[bytes]:
         """Synthesize using Coqui TTS"""
@@ -357,6 +398,13 @@ class TTSManager:
         if self._session:
             await self._session.close()
             self._session = None
+
+        # Cleanup PiperEngine if present
+        piper_info = self._providers.get(TTSProvider.LOCAL_PIPER)
+        if piper_info and piper_info.get("engine"):
+            piper_engine = piper_info["engine"]
+            if isinstance(piper_engine, PiperEngine):
+                await piper_engine.cleanup()
 
         self.is_initialized = False
         self._providers.clear()

@@ -19,8 +19,9 @@ logger = logging.getLogger(__name__)
 
 
 class VoicePipeline:
-    def __init__(self, use_pipecat: bool = True):
+    def __init__(self, use_pipecat: bool = True, enable_agent_integration: bool = True):
         self.use_pipecat = use_pipecat
+        self.enable_agent_integration = enable_agent_integration
 
         # Initialize all components for compatibility
         self.tts_manager = TTSManager()
@@ -33,6 +34,7 @@ class VoicePipeline:
 
         self.active_calls: Dict[str, CallSession] = {}
         self.is_initialized = False
+        self.agent_orchestrator: Optional[Any] = None
 
         # Callbacks
         self._on_call_started: Optional[Callable] = None
@@ -43,7 +45,20 @@ class VoicePipeline:
     async def initialize(self):
         """Initialize all voice processing components"""
         try:
-            logger.info(f"Initializing Voice Pipeline (Pipecat: {self.use_pipecat})...")
+            logger.info(f"Initializing Voice Pipeline (Pipecat: {self.use_pipecat}, AgentIntegration: {self.enable_agent_integration})...")
+
+            # Initialize agent orchestrator if enabled
+            if self.enable_agent_integration:
+                from ..agents.orchestrator import agent_orchestrator
+                self.agent_orchestrator = agent_orchestrator
+
+                if not self.agent_orchestrator.is_initialized:
+                    init_success = await self.agent_orchestrator.initialize()
+                    if not init_success:
+                        logger.warning("Agent orchestrator initialization failed, disabling agent integration")
+                        self.enable_agent_integration = False
+                    else:
+                        logger.info("Agent orchestrator initialized successfully")
 
             if self.use_pipecat:
                 # Initialize Pipecat pipeline and Twilio

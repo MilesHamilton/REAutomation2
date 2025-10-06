@@ -5,11 +5,22 @@ import logging
 from typing import Dict, Any, Optional
 from functools import wraps
 
-from ..agents.orchestrator import AgentOrchestrator, agent_orchestrator
 from .tracing import trace_workflow, trace_agent_execution, get_langsmith_client
 from .langsmith_client import shutdown_langsmith_client
 
 logger = logging.getLogger(__name__)
+
+
+def _get_orchestrator():
+    """Lazy import to avoid circular imports"""
+    from ..agents.orchestrator import agent_orchestrator
+    return agent_orchestrator
+
+
+def _get_orchestrator_class():
+    """Lazy import to avoid circular imports"""
+    from ..agents.orchestrator import AgentOrchestrator
+    return AgentOrchestrator
 
 
 def enable_monitoring():
@@ -17,6 +28,9 @@ def enable_monitoring():
     Enable LangSmith monitoring for the global AgentOrchestrator instance
     """
     try:
+        agent_orchestrator = _get_orchestrator()
+        AgentOrchestrator = _get_orchestrator_class()
+        
         # Apply tracing to the process_input method
         if not hasattr(agent_orchestrator.process_input, '_monitoring_enabled'):
             original_process_input = agent_orchestrator.process_input
@@ -117,6 +131,7 @@ def get_monitoring_status() -> Dict[str, Any]:
     Get the current monitoring status
     """
     try:
+        agent_orchestrator = _get_orchestrator()
         langsmith_client = get_langsmith_client()
         return {
             "enabled": langsmith_client.enabled,
@@ -140,5 +155,5 @@ def _auto_enable_monitoring():
         logger.debug(f"Auto-enable monitoring failed: {e}")
 
 
-# Call auto-enable
-_auto_enable_monitoring()
+# Disable auto-enable to prevent circular imports
+# _auto_enable_monitoring()

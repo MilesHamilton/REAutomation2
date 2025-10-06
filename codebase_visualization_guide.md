@@ -39,13 +39,25 @@ mamba install -c conda-forge graphviz
 2. Extract to a folder (e.g., `C:\Tools\graphviz`)
 3. Add `C:\Tools\graphviz\bin` to your PATH environment variable
 
-### Method 5: WSL (Windows Subsystem for Linux)
+### Method 5: WSL (Windows Subsystem for Linux) ✅ INSTALLED
 
 ```bash
 # In WSL terminal
 sudo apt update
 sudo apt install graphviz
+
+# Verify installation
+dot -V
+# Should output: dot - graphviz version 2.43.0 (0)
 ```
+
+**Status**: ✅ **Graphviz is successfully installed in your WSL environment**
+- Version: 2.43.0
+- All Graphviz tools available: dot, neato, circo, fdp, sfdp, twopi
+- Virtual environment created with pydeps installed
+- Sample dependency graphs generated successfully
+
+**Note for WSL Users**: The error message about `/usr/bin/wslview` not found is normal and can be ignored. This just means the SVG files won't auto-open, but they are created successfully and can be viewed manually.
 
 ## 📊 Visualization Tools for Your Codebase
 

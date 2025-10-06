@@ -7,9 +7,9 @@ Includes LangSmith integration, performance monitoring, alerting, and dashboard 
 
 from .langsmith_client import LangSmithClient, get_langsmith_client
 from .models import (
-    WorkflowStatus, AlertSeverity, AlertType, MetricType,
-    WorkflowTrace, AgentExecution, PerformanceData,
-    AlertRule, AlertNotification
+    WorkflowStatus, AlertLevel, AlertType, MetricCategory,
+    WorkflowTrace, AgentExecution, PerformanceMetric,
+    AlertRule, Alert
 )
 from .tracing import (
     trace_workflow, trace_agent_execution,
@@ -42,14 +42,14 @@ __all__ = [
 
     # Models and types
     "WorkflowStatus",
-    "AlertSeverity",
+    "AlertLevel",
     "AlertType",
-    "MetricType",
+    "MetricCategory",
     "WorkflowTrace",
     "AgentExecution",
-    "PerformanceData",
+    "PerformanceMetric",
     "AlertRule",
-    "AlertNotification",
+    "Alert",
 
     # Tracing
     "trace_workflow",

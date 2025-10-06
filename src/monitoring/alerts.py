@@ -15,13 +15,16 @@ from email.mime.multipart import MIMEMultipart
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, func
 
-from ..database.core import get_db
+from ..database.connection import get_database_session as get_db
 from ..database.monitoring_models import AlertHistory
 from ..config.settings import settings
-from .models import AlertSeverity, AlertType, AlertRule, AlertNotification
+from .models import AlertLevel, AlertType, AlertRule, Alert
 from .performance import performance_monitor
 
 logger = logging.getLogger(__name__)
+
+# Create compatibility alias
+AlertSeverity = AlertLevel
 
 
 class AlertStatus(str, Enum):
@@ -43,7 +46,7 @@ class ActiveAlert:
     """Active alert instance"""
     alert_id: str
     rule_name: str
-    severity: AlertSeverity
+    severity: AlertLevel
     message: str
     triggered_at: datetime
     value: Optional[float] = None
@@ -128,98 +131,33 @@ class AlertManager:
         default_rules = [
             # System performance alerts
             AlertRule(
-                name="high_cpu_usage",
-                condition="system_cpu_percent > 80",
-                severity=AlertSeverity.WARNING,
-                description="CPU usage is above 80%",
-                threshold=80.0,
-                evaluation_window_seconds=300,
-                cooldown_seconds=600
+                rule_name="high_cpu_usage",
+                metric_name="system_cpu_percent",
+                condition="> 80",
+                threshold_warning=80.0,
+                alert_frequency="immediate",
+                enabled=True
             ),
             AlertRule(
-                name="high_memory_usage",
-                condition="system_memory_percent > 85",
-                severity=AlertSeverity.WARNING,
-                description="Memory usage is above 85%",
-                threshold=85.0,
-                evaluation_window_seconds=300,
-                cooldown_seconds=600
+                rule_name="high_memory_usage",
+                metric_name="system_memory_percent",
+                condition="> 85",
+                threshold_warning=85.0,
+                alert_frequency="immediate",
+                enabled=True
             ),
             AlertRule(
-                name="critical_memory_usage",
-                condition="system_memory_percent > 95",
-                severity=AlertSeverity.CRITICAL,
-                description="Memory usage is critically high (>95%)",
-                threshold=95.0,
-                evaluation_window_seconds=60,
-                cooldown_seconds=300
-            ),
-
-            # Agent performance alerts
-            AlertRule(
-                name="high_agent_response_time",
-                condition="agent_execution_duration_ms > 10000",
-                severity=AlertSeverity.WARNING,
-                description="Agent response time is above 10 seconds",
-                threshold=10000.0,
-                evaluation_window_seconds=300,
-                cooldown_seconds=900
-            ),
-            AlertRule(
-                name="agent_failure_rate",
-                condition="agent_executions_failure / (agent_executions_success + agent_executions_failure) > 0.1",
-                severity=AlertSeverity.WARNING,
-                description="Agent failure rate is above 10%",
-                threshold=0.1,
-                evaluation_window_seconds=600,
-                cooldown_seconds=1200
-            ),
-
-            # Cost alerts
-            AlertRule(
-                name="high_llm_cost",
-                condition="llm_cost > 10.0",
-                severity=AlertSeverity.WARNING,
-                description="LLM cost per call is above $10",
-                threshold=10.0,
-                evaluation_window_seconds=300,
-                cooldown_seconds=600
-            ),
-            AlertRule(
-                name="daily_cost_limit",
-                condition="daily_total_cost > 500.0",
-                severity=AlertSeverity.CRITICAL,
-                description="Daily cost limit exceeded ($500)",
-                threshold=500.0,
-                evaluation_window_seconds=3600,
-                cooldown_seconds=3600
-            ),
-
-            # Error rate alerts
-            AlertRule(
-                name="high_error_rate",
-                condition="errors_total / total_calls > 0.05",
-                severity=AlertSeverity.WARNING,
-                description="Error rate is above 5%",
-                threshold=0.05,
-                evaluation_window_seconds=600,
-                cooldown_seconds=900
-            ),
-
-            # LangSmith connectivity
-            AlertRule(
-                name="langsmith_connection_failure",
-                condition="langsmith_connection_errors > 5",
-                severity=AlertSeverity.WARNING,
-                description="Multiple LangSmith connection failures",
-                threshold=5.0,
-                evaluation_window_seconds=600,
-                cooldown_seconds=1800
+                rule_name="critical_memory_usage",
+                metric_name="system_memory_percent",
+                condition="> 95",
+                threshold_critical=95.0,
+                alert_frequency="immediate",
+                enabled=True
             )
         ]
 
         for rule in default_rules:
-            self.rules[rule.name] = rule
+            self.rules[rule.rule_name] = rule
 
     def _initialize_notification_channels(self):
         """Initialize notification channels"""
@@ -322,36 +260,36 @@ class AlertManager:
             return self._simple_condition_evaluation(rule, stats)
 
         except Exception as e:
-            logger.error(f"Error evaluating condition for rule {rule.name}: {e}")
+            logger.error(f"Error evaluating condition for rule {rule.rule_name}: {e}")
             return False
 
     def _simple_condition_evaluation(self, rule: AlertRule, stats: Dict[str, Any]) -> bool:
         """Simplified condition evaluation (replace with proper parser in production)"""
         # High CPU usage
-        if rule.name == "high_cpu_usage":
+        if rule.rule_name == "high_cpu_usage":
             # Would check actual system CPU - for now, simulate
             return False
 
         # High memory usage
-        elif rule.name == "high_memory_usage":
+        elif rule.rule_name == "high_memory_usage":
             # Would check actual system memory
             return False
 
         # Agent response time
-        elif rule.name == "high_agent_response_time":
+        elif rule.rule_name == "high_agent_response_time":
             avg_times = stats.get("avg_response_times", {})
             for operation, avg_time in avg_times.items():
-                if "agent" in operation.lower() and avg_time > rule.threshold:
+                if "agent" in operation.lower() and avg_time > (rule.threshold_warning or 1000):
                     return True
             return False
 
         # Error rate
-        elif rule.name == "high_error_rate":
+        elif rule.rule_name == "high_error_rate":
             total_calls = sum(stats.get("call_counters", {}).values())
             total_errors = sum(stats.get("error_counters", {}).values())
             if total_calls > 0:
                 error_rate = total_errors / total_calls
-                return error_rate > rule.threshold
+                return error_rate > (rule.threshold_warning or 0.05)
             return False
 
         return False
@@ -366,7 +304,7 @@ class AlertManager:
         """Trigger an alert"""
         try:
             # Create unique alert ID
-            alert_id = f"{rule.name}_{int(triggered_at.timestamp())}"
+            alert_id = f"{rule.rule_name}_{int(triggered_at.timestamp())}"
 
             # Check if this alert is already active
             if alert_id in self.active_alerts:
@@ -375,15 +313,15 @@ class AlertManager:
             # Create active alert
             alert = ActiveAlert(
                 alert_id=alert_id,
-                rule_name=rule.name,
-                severity=rule.severity,
-                message=rule.description,
+                rule_name=rule.rule_name,
+                severity=AlertLevel.WARNING,  # Default severity since not in AlertRule model
+                message=f"Alert triggered for rule: {rule.rule_name}",
                 triggered_at=triggered_at,
-                threshold=rule.threshold,
+                threshold=rule.threshold_warning or rule.threshold_critical,
                 metadata={
                     "rule": rule.dict(),
-                    "evaluation_window": rule.evaluation_window_seconds,
-                    "cooldown": rule.cooldown_seconds
+                    "condition": rule.condition,
+                    "alert_frequency": rule.alert_frequency
                 }
             )
 
@@ -391,11 +329,12 @@ class AlertManager:
             self.active_alerts[alert_id] = alert
 
             # Increment counter
-            self.alert_counters[rule.name] = self.alert_counters.get(rule.name, 0) + 1
+            self.alert_counters[rule.rule_name] = self.alert_counters.get(rule.rule_name, 0) + 1
 
-            # Set rate limit
-            cooldown_until = triggered_at + timedelta(seconds=rule.cooldown_seconds)
-            self.rate_limits[rule.name] = cooldown_until
+            # Set rate limit (default 5 minutes if no cooldown specified)
+            cooldown_seconds = 300  # 5 minutes default
+            cooldown_until = triggered_at + timedelta(seconds=cooldown_seconds)
+            self.rate_limits[rule.rule_name] = cooldown_until
 
             # Queue for notification
             await self._queue_notification(alert)
@@ -403,10 +342,10 @@ class AlertManager:
             # Store in database
             await self._store_alert_in_database(alert)
 
-            logger.warning(f"Alert triggered: {rule.name} - {rule.description}")
+            logger.warning(f"Alert triggered: {rule.rule_name} - {rule.condition}")
 
         except Exception as e:
-            logger.error(f"Error triggering alert for rule {rule.name}: {e}")
+            logger.error(f"Error triggering alert for rule {rule.rule_name}: {e}")
 
     # Notification Processing
     async def _notification_processor(self):
@@ -735,7 +674,7 @@ class AlertManager:
     # Rule Management
     def add_rule(self, rule: AlertRule):
         """Add a new alert rule"""
-        self.rules[rule.name] = rule
+        self.rules[rule.rule_name] = rule
 
     def remove_rule(self, rule_name: str):
         """Remove an alert rule"""

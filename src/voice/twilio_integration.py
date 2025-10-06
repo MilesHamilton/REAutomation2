@@ -150,15 +150,26 @@ class TwilioIntegration:
                 timestamp = media.get("timestamp", "0")
 
                 if payload:
-                    # Decode base64 audio data
-                    audio_data = base64.b64decode(payload)
+                    # Decode base64 audio data (µ-law format from Twilio)
+                    mulaw_data = base64.b64decode(payload)
 
-                    # Create audio chunk
+                    # Convert µ-law to PCM (16-bit)
+                    pcm_data = self._convert_from_mulaw(mulaw_data)
+
+                    # Resample from 8kHz (Twilio) to 16kHz (standard for voice processing)
+                    resampled_data = self._resample_audio(
+                        audio_data=pcm_data,
+                        from_rate=8000,
+                        to_rate=16000,
+                        channels=1
+                    )
+
+                    # Create audio chunk with converted data
                     chunk = AudioChunk(
-                        data=audio_data,
+                        data=resampled_data,  # Now 16kHz PCM
                         timestamp=float(timestamp) / 1000.0,  # Convert to seconds
                         chunk_id=int(timestamp),
-                        sample_rate=8000,  # Twilio uses 8kHz µ-law
+                        sample_rate=16000,  # Updated to 16kHz after resampling
                         channels=1,
                         is_speech=True  # Assume speech for now
                     )
@@ -198,8 +209,18 @@ class TwilioIntegration:
         except Exception as e:
             logger.error(f"Error in audio stream for call {call_id}: {e}")
 
-    async def play_audio(self, call_id: str, audio_data: bytes) -> bool:
-        """Play audio through the call"""
+    async def play_audio(self, call_id: str, audio_data: bytes, sample_rate: int = 16000) -> bool:
+        """
+        Play audio through the call
+
+        Args:
+            call_id: Unique identifier for the call
+            audio_data: PCM audio data (16-bit)
+            sample_rate: Sample rate of input audio (default: 16000 Hz)
+
+        Returns:
+            True if audio was sent successfully, False otherwise
+        """
         try:
             if call_id not in self.websocket_connections:
                 logger.error(f"No WebSocket connection for call {call_id}")
@@ -207,7 +228,16 @@ class TwilioIntegration:
 
             websocket = self.websocket_connections[call_id]
 
-            # Convert audio to µ-law format (Twilio requirement)
+            # Resample from source sample rate to 8kHz (Twilio requirement)
+            if sample_rate != 8000:
+                audio_data = self._resample_audio(
+                    audio_data=audio_data,
+                    from_rate=sample_rate,
+                    to_rate=8000,
+                    channels=1
+                )
+
+            # Convert PCM to µ-law format (Twilio requirement)
             mulaw_data = self._convert_to_mulaw(audio_data)
 
             # Encode as base64
@@ -225,7 +255,7 @@ class TwilioIntegration:
             # Send through WebSocket
             await websocket.send(json.dumps(media_message))
 
-            logger.debug(f"Audio sent to call {call_id}")
+            logger.debug(f"Audio sent to call {call_id} (resampled {sample_rate}Hz -> 8kHz)")
             return True
 
         except Exception as e:
@@ -244,6 +274,57 @@ class TwilioIntegration:
         except Exception as e:
             logger.error(f"Error converting audio to µ-law: {e}")
             return pcm_data
+
+    def _convert_from_mulaw(self, mulaw_data: bytes) -> bytes:
+        """Convert µ-law audio to 16-bit PCM format"""
+        try:
+            import audioop
+            # Convert µ-law to 16-bit PCM
+            return audioop.ulaw2lin(mulaw_data, 2)
+        except ImportError:
+            logger.warning("audioop not available, returning µ-law data as-is")
+            return mulaw_data
+        except Exception as e:
+            logger.error(f"Error converting audio from µ-law: {e}")
+            return mulaw_data
+
+    def _resample_audio(self, audio_data: bytes, from_rate: int, to_rate: int, channels: int = 1) -> bytes:
+        """
+        Resample audio from one sample rate to another
+
+        Args:
+            audio_data: Raw PCM audio bytes (16-bit)
+            from_rate: Source sample rate (e.g., 8000)
+            to_rate: Target sample rate (e.g., 16000)
+            channels: Number of audio channels (default: 1 for mono)
+
+        Returns:
+            Resampled audio as bytes
+        """
+        try:
+            import numpy as np
+            from scipy import signal
+
+            # Convert bytes to numpy array (16-bit signed integers)
+            audio_array = np.frombuffer(audio_data, dtype=np.int16)
+
+            # Calculate the number of samples after resampling
+            num_samples = int(len(audio_array) * to_rate / from_rate)
+
+            # Resample using scipy
+            resampled = signal.resample(audio_array, num_samples)
+
+            # Convert back to 16-bit integers and then to bytes
+            resampled_int16 = resampled.astype(np.int16)
+            return resampled_int16.tobytes()
+
+        except ImportError as e:
+            logger.error(f"scipy or numpy not available for resampling: {e}")
+            # Fallback: return original data
+            return audio_data
+        except Exception as e:
+            logger.error(f"Error resampling audio from {from_rate}Hz to {to_rate}Hz: {e}")
+            return audio_data
 
     async def end_call(self, call_id: str) -> bool:
         """End a call"""

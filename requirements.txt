@@ -1,39 +1,77 @@
-fastapi==0.104.1
-uvicorn==0.24.0
-pydantic==2.5.0
-pydantic-settings==2.1.0
-langchain==0.1.0
-langgraph==0.0.25
-pipecat-ai==0.0.14
-twilio==8.10.0
-openai-whisper==20231117
-piper-tts==1.2.0
-coqui-tts==0.24.2
-sqlalchemy==2.0.23
-alembic==1.12.1
-redis==5.0.1
-aioredis==2.0.1
-psycopg2-binary==2.9.9
-asyncpg==0.29.0
-pytest==7.4.3
-pytest-asyncio==0.21.1
-httpx==0.25.2
-websockets==12.0
-numpy==1.24.3
-scipy==1.11.4
-librosa==0.10.1
-soundfile==1.0.14
-python-multipart==0.0.6
-python-dotenv==1.0.0
-pyyaml==6.0.1
-aiofiles==23.2.1
-jinja2==3.1.2
-requests==2.31.0
-torch>=2.0.0
-torchaudio>=2.0.0
-transformers>=4.30.0
-gspread==5.12.0
-google-auth==2.23.4
-google-auth-oauthlib==1.1.0
-google-auth-httplib2==0.1.1
-langsmith==0.1.77
+# Core web framework
+fastapi>=0.115.0,<0.120.0
+uvicorn>=0.32.0,<0.35.0
+
+# Data validation and settings
+pydantic>=2.10.0,<3.0.0
+pydantic-settings>=2.6.0,<3.0.0
+
+# LangChain ecosystem - updated to latest compatible versions
+langchain>=0.3.0,<0.4.0
+langgraph>=0.2.0,<0.3.0
+langsmith>=0.4.0,<0.5.0
+
+# Voice processing
+pipecat-ai>=0.0.86,<0.1.0
+twilio>=9.3.0,<10.0.0
+openai-whisper>=20250625
+faster-whisper>=1.0.0,<2.0.0  # Optional: CTranslate2-based optimization
+
+# Local TTS engines
+piper-tts>=1.2.0  # Native Piper TTS library
+TTS>=0.22.0  # Coqui TTS
+onnxruntime>=1.17.0  # For Piper ONNX models (CPU)
+
+# Audio processing (echo cancellation, noise reduction)
+speexdsp-python>=1.4.0  # Speex DSP for echo cancellation
+noisereduce>=3.0.0  # Statistical noise reduction
+
+# Database
+sqlalchemy>=2.0.0,<2.1.0
+alembic>=1.14.0,<2.0.0
+redis>=5.2.0,<6.0.0
+aioredis>=2.0.0,<3.0.0
+psycopg2-binary>=2.9.0,<3.0.0
+asyncpg>=0.30.0,<0.31.0
+
+# Testing
+pytest>=8.0.0,<9.0.0
+pytest-asyncio>=0.23.0,<0.25.0
+
+# HTTP and WebSocket
+httpx>=0.27.0,<0.29.0
+websockets>=12.0,<14.0
+
+# Scientific computing
+numpy>=1.26.0,<3.0.0
+scipy>=1.11.0,<2.0.0
+librosa>=0.10.1,<0.12.0
+soundfile>=0.12.1,<0.14.0
+
+# Web utilities
+python-multipart>=0.0.6,<0.1.0
+python-dotenv>=1.0.0,<2.0.0
+pyyaml>=6.0.0,<7.0.0
+aiofiles>=24.1.0,<25.0.0
+jinja2>=3.1.0,<4.0.0
+requests>=2.31.0,<3.0.0
+
+# ML frameworks - updated to latest
+torch>=2.0.0,<3.0.0
+torchaudio>=2.0.0,<3.0.0
+transformers>=4.30.0,<5.0.0
+
+# Google services
+gspread>=5.12.0,<7.0.0
+google-auth>=2.23.0,<3.0.0
+google-auth-oauthlib>=1.1.0,<2.0.0
+google-auth-httplib2>=0.1.0,<0.3.0
+
+# System utilities
+psutil>=5.9.0
+backoff>=2.2.1
+icalendar>=5.0.0
+pytz>=2023.3
+
+# Token counting for context management
+tiktoken>=0.5.0,<1.0.0

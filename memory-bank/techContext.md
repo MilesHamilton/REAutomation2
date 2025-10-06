@@ -12,8 +12,8 @@
 ### AI & Language Models
 
 - **LangChain 0.1.0**: Framework for developing applications with language models
-- **LangGraph 0.0.25**: Library for building stateful, multi-actor applications with LLMs
-- **LangSmith**: Production monitoring and tracing for LangChain applications
+- **LangGraph 0.6.8**: Library for building stateful, multi-actor applications with LLMs (upgraded from 0.0.25)
+- **LangSmith >=0.0.77,<0.1.0**: Production monitoring and tracing for LangChain applications
 - **Ollama**: Local LLM inference server (Llama 3.1 8B model)
 - **OpenAI Whisper 20231117**: Automatic speech recognition system
 
@@ -31,6 +31,18 @@
 - **SoundFile 1.0.14**: Audio file I/O operations
 - **NumPy 1.24.3**: Numerical computing for audio data
 - **SciPy 1.11.4**: Scientific computing and signal processing
+- **Speex DSP >=1.4.0** (speexdsp-python): Acoustic echo cancellation and audio preprocessing
+- **NoiseReduce >=3.0.0**: Statistical noise reduction for speech clarity
+
+#### Real-Time Audio Processing Pipeline
+
+- **AudioBufferManager**: Circular buffer for 20ms chunk management with latency tracking
+- **AdaptiveJitterBuffer**: Network jitter handling with 40-200ms adaptive delay range
+- **PacketLossConcealment**: Three methods (simple, linear, spectral) for lost packet recovery
+- **EchoCancellationProcessor**: Speex AEC engine with NLMS adaptive filter fallback
+- **NoiseReductionProcessor**: noisereduce library with spectral subtraction fallback
+- **AudioProcessor**: Unified pipeline orchestrating all audio components
+- **Performance**: <200ms latency target, <50ms processing overhead, >5x real-time throughput
 
 ### Machine Learning
 
@@ -60,6 +72,11 @@
 - **AIOFiles 23.2.1**: Async file operations
 - **Jinja2 3.1.2**: Template engine
 - **Requests 2.31.0**: HTTP library for external API calls
+- **psutil >=5.9.0**: System and process monitoring utilities
+- **backoff >=2.2.1**: Exponential backoff and retry functionality
+- **icalendar >=5.0.0**: Calendar data parsing and generation
+- **pytz >=2023.3**: Timezone handling and conversion
+- **cartesia ~=2.0.3**: Cartesia TTS service integration (via pipecat-ai[cartesia])
 
 ## Development Setup
 
@@ -117,9 +134,14 @@ QUALIFICATION_THRESHOLD=0.8
 ### Performance Requirements
 
 - **Response Time**: <500ms for LLM inference
-- **Audio Latency**: <200ms for real-time conversation
+- **Audio Latency**: <200ms total for real-time conversation
+  - Jitter Buffer: 40-200ms adaptive delay
+  - Echo Cancellation: <10ms processing overhead
+  - Noise Reduction: <20ms processing overhead
+  - Buffer Management: <5ms per operation
 - **Concurrent Calls**: Up to 5 simultaneous calls
 - **Memory Usage**: <8GB per instance under normal load
+- **Audio Throughput**: >5x real-time (handle 100+ packets in <5s)
 
 ### Resource Limitations
 
@@ -166,10 +188,16 @@ QUALIFICATION_THRESHOLD=0.8
 
 ### Testing Strategy
 
-- **Unit Tests**: Individual component testing
+- **Unit Tests**: Individual component testing (137 audio processing tests)
+  - Audio Buffer Management: 48 tests (391 lines)
+  - Jitter Buffer: 39 tests (385 lines)
+  - Audio Processing Components: 50 tests (470 lines)
 - **Integration Tests**: API endpoint testing
 - **Load Tests**: Concurrent call simulation
 - **Voice Tests**: Audio pipeline validation
+- **Performance Tests**: Latency and throughput benchmarks
+  - Processing latency: <50ms per packet target
+  - Throughput: 100 packets in <5s target
 
 ### Monitoring & Debugging
 

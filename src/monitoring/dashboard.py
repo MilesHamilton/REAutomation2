@@ -15,7 +15,7 @@ from fastapi.templating import Jinja2Templates
 from .performance import performance_monitor
 from .alerts import alert_manager
 from .langsmith_client import get_langsmith_client
-from ..database.core import get_db
+from ..database.connection import get_database_session as get_db
 from ..database.monitoring_models import WorkflowTrace, AgentExecution, PerformanceMetrics
 
 logger = logging.getLogger(__name__)
@@ -135,6 +135,12 @@ class DashboardManager:
                 if avg_response_times else 0
             )
 
+            # Get GPU metrics
+            gpu_metrics = await self._get_gpu_metrics()
+
+            # Get streaming metrics
+            streaming_metrics = await self._get_streaming_metrics()
+
             return {
                 "total_calls": total_calls,
                 "total_errors": total_errors,
@@ -144,12 +150,74 @@ class DashboardManager:
                     op: round(time, 2) for op, time in avg_response_times.items()
                 },
                 "call_counts_by_operation": perf_stats.get("call_counters", {}),
-                "error_counts_by_type": perf_stats.get("error_counters", {})
+                "error_counts_by_type": perf_stats.get("error_counters", {}),
+                "gpu": gpu_metrics,
+                "streaming": streaming_metrics
             }
 
         except Exception as e:
             logger.error(f"Error getting performance summary: {e}")
             return {"error": str(e)}
+
+    async def _get_gpu_metrics(self) -> Dict[str, Any]:
+        """Get GPU performance metrics"""
+        try:
+            from ..llm.gpu_manager import gpu_manager
+            gpu_metrics = await gpu_manager.get_metrics()
+
+            if not gpu_metrics or not gpu_metrics.get("available", False):
+                return {
+                    "available": False,
+                    "message": "GPU monitoring not available"
+                }
+
+            return {
+                "available": True,
+                "utilization_percent": round(gpu_metrics.get("utilization_percent", 0), 1),
+                "memory_used_mb": round(gpu_metrics.get("used_memory_mb", 0), 1),
+                "memory_total_mb": round(gpu_metrics.get("total_memory_mb", 0), 1),
+                "memory_utilization_percent": round(
+                    (gpu_metrics.get("used_memory_mb", 0) / gpu_metrics.get("total_memory_mb", 1)) * 100, 1
+                ),
+                "temperature_celsius": round(gpu_metrics.get("temperature", 0), 1),
+                "models_loaded": gpu_metrics.get("models_loaded", 0),
+                "power_draw_watts": gpu_metrics.get("power_draw")
+            }
+
+        except Exception as e:
+            logger.debug(f"GPU metrics error: {e}")
+            return {
+                "available": False,
+                "error": str(e)
+            }
+
+    async def _get_streaming_metrics(self) -> Dict[str, Any]:
+        """Get streaming performance metrics"""
+        try:
+            from ..llm.service import llm_service
+            streaming_metrics = llm_service.get_streaming_metrics()
+
+            if not streaming_metrics or streaming_metrics.get("total_streams", 0) == 0:
+                return {
+                    "available": False,
+                    "message": "No streaming data available"
+                }
+
+            return {
+                "available": True,
+                "total_streams": streaming_metrics.get("total_streams", 0),
+                "avg_ttfc_ms": round(streaming_metrics.get("avg_time_to_first_chunk_ms", 0), 1),
+                "avg_duration_ms": round(streaming_metrics.get("avg_total_duration_ms", 0), 1),
+                "avg_throughput_tokens_per_second": round(streaming_metrics.get("avg_throughput_tokens_per_second", 0), 1),
+                "avg_chunks_per_stream": round(streaming_metrics.get("avg_chunks_per_stream", 0), 1)
+            }
+
+        except Exception as e:
+            logger.debug(f"Streaming metrics error: {e}")
+            return {
+                "available": False,
+                "error": str(e)
+            }
 
     async def _get_active_alerts(self) -> List[Dict[str, Any]]:
         """Get active alerts for dashboard"""
@@ -340,7 +408,13 @@ class DashboardManager:
             self.disconnect_websocket(connection)
 
     async def start_real_time_updates(self):
-        """Start real-time dashboard updates"""
+        """Start real-time dashboard updates as a background task"""
+        # Create background task instead of blocking
+        asyncio.create_task(self._real_time_update_loop())
+        logger.info("Dashboard real-time updates started as background task")
+
+    async def _real_time_update_loop(self):
+        """Background loop for real-time updates"""
         while True:
             try:
                 if self.active_connections:

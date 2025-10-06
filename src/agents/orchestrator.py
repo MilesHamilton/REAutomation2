@@ -2,7 +2,7 @@ import asyncio
 import logging
 import time
 from typing import Dict, Any, Optional, List, Callable
-from langgraph import StateGraph, END
+from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from .models import (
@@ -183,6 +183,115 @@ class AgentOrchestrator:
                 agent_type=AgentType.CONVERSATION,
                 response_text="I apologize, I experienced a technical issue. Could you repeat that?"
             )
+
+    async def process_voice_input(
+        self,
+        call_id: str,
+        user_input: str,
+        lead_data: Optional[Dict[str, Any]] = None
+    ) -> Optional[AgentResponse]:
+        """Process voice input with voice-specific optimizations"""
+        try:
+            # Get or create voice-specific context
+            context = self._get_or_create_voice_context(call_id, lead_data)
+
+            # Process through standard workflow
+            agent_response = await self.process_input(call_id, user_input, lead_data)
+
+            if agent_response:
+                # Optimize response for voice delivery
+                agent_response = self._optimize_for_voice(agent_response)
+
+                # Check if tier escalation is needed based on qualification
+                if self._check_tier_escalation_needed(context):
+                    agent_response.should_escalate_tier = True
+
+            return agent_response
+
+        except Exception as e:
+            logger.error(f"Error processing voice input for call {call_id}: {e}")
+            return self._create_fallback_response()
+
+    def _get_or_create_voice_context(
+        self,
+        call_id: str,
+        lead_data: Optional[Dict[str, Any]] = None
+    ) -> WorkflowContext:
+        """Get or create context with voice-specific metadata"""
+        context = self._get_or_create_context(call_id, lead_data)
+
+        # Add voice-specific metadata
+        if "voice_mode" not in context.metadata:
+            context.metadata["voice_mode"] = True
+            context.metadata["response_style"] = "concise"
+            context.metadata["max_response_length"] = 150  # words
+
+        return context
+
+    def _optimize_for_voice(self, response: AgentResponse) -> AgentResponse:
+        """Optimize agent response for voice delivery"""
+        try:
+            if response.response_text:
+                # Remove markdown formatting
+                text = response.response_text.replace("*", "").replace("#", "")
+
+                # Simplify complex punctuation
+                text = text.replace("  ", " ").strip()
+
+                # Ensure conversational flow
+                if len(text.split()) > 150:
+                    # Truncate to ~150 words at sentence boundary
+                    sentences = text.split(". ")
+                    truncated = []
+                    word_count = 0
+
+                    for sentence in sentences:
+                        words = sentence.split()
+                        if word_count + len(words) <= 150:
+                            truncated.append(sentence)
+                            word_count += len(words)
+                        else:
+                            break
+
+                    text = ". ".join(truncated)
+                    if not text.endswith("."):
+                        text += "."
+
+                response.response_text = text
+
+            return response
+
+        except Exception as e:
+            logger.error(f"Error optimizing response for voice: {e}")
+            return response
+
+    def _check_tier_escalation_needed(self, context: WorkflowContext) -> bool:
+        """Check if tier escalation should be triggered"""
+        try:
+            # Check qualification score
+            if context.qualification_score >= 0.7:  # Threshold from settings
+                return True
+
+            # Check if lead has high-value indicators
+            lead_data = context.lead_data
+            if lead_data.get("budget") and lead_data.get("budget") > 10000:
+                return True
+
+            if lead_data.get("urgency") == "high":
+                return True
+
+            return False
+
+        except Exception as e:
+            logger.error(f"Error checking tier escalation: {e}")
+            return False
+
+    def _create_fallback_response(self) -> AgentResponse:
+        """Create a fallback response for error conditions"""
+        return AgentResponse(
+            agent_type=AgentType.CONVERSATION,
+            response_text="I apologize for the brief interruption. Could you please repeat that?"
+        )
 
     def _get_or_create_context(
         self,

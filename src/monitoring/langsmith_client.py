@@ -8,8 +8,8 @@ import traceback
 import json
 
 from langsmith import Client
-from langsmith.schemas import Run, RunCreate
-from langsmith.utils import tracing_context
+from langsmith.schemas import Run
+from uuid import uuid4
 
 from ..config.settings import settings
 from ..database.monitoring_models import (
@@ -123,8 +123,10 @@ class LangSmithClient:
 
         if self.enabled and self.circuit_breaker.can_execute():
             try:
-                # Create LangSmith run
-                run_create = RunCreate(
+                # Create LangSmith run using new API
+                run_id = uuid4()
+                self.client.create_run(
+                    id=run_id,
                     name=f"workflow_{workflow_name}",
                     run_type="chain",
                     inputs=initial_context or {},
@@ -134,13 +136,13 @@ class LangSmithClient:
                         "call_id": call_id,
                         "trace_id": trace_id,
                         "workflow_version": workflow_version
-                    }
+                    },
+                    start_time=datetime.utcnow()
                 )
-
-                run = self.client.create_run(run_create)
-                trace_data["langsmith_run_id"] = str(run.id)
+                
+                trace_data["langsmith_run_id"] = str(run_id)
                 trace_data["langsmith_project"] = settings.langsmith_project
-                trace_data["langsmith_url"] = f"{settings.langsmith_endpoint}/runs/{run.id}"
+                trace_data["langsmith_url"] = f"{settings.langsmith_endpoint}/runs/{run_id}"
 
                 self.circuit_breaker.record_success()
                 logger.debug(f"Created LangSmith run for trace {trace_id}")
@@ -267,7 +269,10 @@ class LangSmithClient:
                         break
 
                 if parent_trace and parent_trace.get("langsmith_run_id"):
-                    run_create = RunCreate(
+                    # Create child run using new API
+                    run_id = uuid4()
+                    self.client.create_run(
+                        id=run_id,
                         name=f"agent_{agent_type}_{agent_name}",
                         run_type="tool",
                         inputs=input_data or {},
@@ -278,11 +283,11 @@ class LangSmithClient:
                             "execution_id": execution_id,
                             "agent_version": agent_version,
                             "execution_order": execution_order
-                        }
+                        },
+                        start_time=datetime.utcnow()
                     )
 
-                    run = self.client.create_run(run_create)
-                    execution_data["langsmith_run_id"] = str(run.id)
+                    execution_data["langsmith_run_id"] = str(run_id)
 
                     self.circuit_breaker.record_success()
                     logger.debug(f"Created LangSmith run for execution {execution_id}")

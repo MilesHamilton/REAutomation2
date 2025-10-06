@@ -7,11 +7,12 @@ from fastapi.responses import JSONResponse
 
 from ..config import settings
 from ..llm import llm_service
-from .routers import llm, health, calls, integrations, monitoring
+from .routers import llm, health, calls, integrations, monitoring, streaming
 from .middleware import RequestLoggingMiddleware, MetricsMiddleware
 from ..monitoring.performance import performance_monitor
 from ..monitoring.alerts import alert_manager
 from ..monitoring.dashboard import dashboard_manager
+from ..database.connection import db_manager
 
 # Configure logging
 logging.basicConfig(level=settings.log_level)
@@ -22,6 +23,13 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting REAutomation TTS API server...")
+
+    # Initialize database
+    logger.info("Initializing database...")
+    db_success = await db_manager.initialize()
+    if not db_success:
+        logger.error("Failed to initialize database")
+        raise RuntimeError("Database initialization failed")
 
     # Initialize LLM service
     startup_success = await llm_service.startup()
@@ -58,6 +66,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error shutting down monitoring systems: {e}")
 
+    # Shutdown database
+    try:
+        logger.info("Shutting down database...")
+        await db_manager.cleanup()
+        logger.info("Database shutdown complete")
+    except Exception as e:
+        logger.error(f"Error shutting down database: {e}")
+
     logger.info("Shutdown complete")
 
 
@@ -91,6 +107,7 @@ app.include_router(llm.router, prefix="/llm", tags=["llm"])
 app.include_router(calls.router, prefix="/calls", tags=["calls"])
 app.include_router(integrations.router, tags=["integrations"])
 app.include_router(monitoring.router, prefix="/monitoring", tags=["monitoring"])
+app.include_router(streaming.router, tags=["streaming"])
 
 
 @app.get("/")

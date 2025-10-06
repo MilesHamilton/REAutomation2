@@ -13,6 +13,8 @@ class Message(BaseModel):
     role: MessageRole
     content: str
     timestamp: Optional[float] = None
+    importance_score: float = Field(default=0.0, description="Importance score for context pruning (0-1)")
+    tokens: int = Field(default=0, description="Token count for this message")
 
 
 class ConversationContext(BaseModel):
@@ -22,6 +24,12 @@ class ConversationContext(BaseModel):
     qualification_score: Optional[float] = None
     conversation_state: str = "initial"
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    # Context management fields
+    total_tokens: int = Field(default=0, description="Total tokens in conversation")
+    context_pruned: bool = Field(default=False, description="Whether context has been pruned")
+    pruning_count: int = Field(default=0, description="Number of times context was pruned")
+    last_pruning_strategy: Optional[str] = Field(default=None, description="Last pruning strategy used")
 
 
 class LLMRequest(BaseModel):

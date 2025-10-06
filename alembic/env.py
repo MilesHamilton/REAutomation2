@@ -35,6 +35,16 @@ def get_database_url():
     # Convert postgres:// to postgresql:// for compatibility
     if database_url and database_url.startswith("postgres://"):
         database_url = database_url.replace("postgres://", "postgresql://", 1)
+    
+    # Convert async URL to sync URL for Alembic migrations
+    if database_url and "+asyncpg" in database_url:
+        database_url = database_url.replace("+asyncpg", "")
+    
+    # Ensure we use psycopg2 for synchronous operations
+    if database_url and database_url.startswith("postgresql://"):
+        # Alembic needs synchronous connection, so we use psycopg2
+        if "+asyncpg" not in database_url and "+psycopg2" not in database_url:
+            database_url = database_url.replace("postgresql://", "postgresql+psycopg2://", 1)
 
     return database_url
 

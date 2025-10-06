@@ -55,6 +55,11 @@ class CallRecord(Base):
     conversation_summary = Column(Text, nullable=True)
     total_messages = Column(Integer, default=0)
 
+    # Context management tracking
+    context_pruned = Column(Boolean, default=False)
+    pruning_count = Column(Integer, default=0)
+    total_context_tokens = Column(Integer, default=0)
+
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
@@ -96,6 +101,10 @@ class ConversationHistory(Base):
     llm_tokens_used = Column(Integer, nullable=True)
     tts_characters = Column(Integer, nullable=True)
     processing_cost = Column(Float, nullable=True)
+
+    # Context management fields
+    importance_score = Column(Float, default=0.0)
+    token_count = Column(Integer, default=0)
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())

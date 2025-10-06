@@ -44,9 +44,15 @@ class TTSConfig(BaseModel):
 class STTConfig(BaseModel):
     model: str = Field(default="whisper-small")
     language: str = Field(default="en")
+    auto_detect_language: bool = Field(default=False)
     vad_enabled: bool = Field(default=True)
     silence_threshold: float = Field(default=0.5)
     max_silence_duration: float = Field(default=2.0)
+    # Phase 3: Performance optimization
+    use_faster_whisper: bool = Field(default=True)  # Use faster-whisper if available
+    compute_type: str = Field(default="float16")  # float16, int8, int8_float16
+    num_workers: int = Field(default=1)  # Number of worker threads for faster-whisper
+    beam_size: int = Field(default=5)  # Beam search size (1 = greedy, higher = more accurate but slower)
 
 
 class VoiceMetrics(BaseModel):
@@ -100,7 +106,14 @@ class STTResult(BaseModel):
     processing_time_ms: float
     is_final: bool = True
     language: str = "en"
+    detected_language: Optional[str] = None
+    language_probability: Optional[float] = None
     chunk_id: Optional[int] = None
+    # Audio quality metrics (Phase 2)
+    audio_quality_score: Optional[float] = None
+    snr_db: Optional[float] = None
+    clipping_detected: bool = False
+    quality_assessment: Optional[str] = None
 
 
 class CallSession(BaseModel):
@@ -118,6 +131,14 @@ class CallSession(BaseModel):
     started_at: Optional[float] = None
     ended_at: Optional[float] = None
     error_message: Optional[str] = None
+
+    # Workflow integration fields
+    workflow_context_id: Optional[str] = None
+    current_agent: Optional[str] = None
+    agent_transition_history: List[str] = Field(default_factory=list)
+    workflow_state: Optional[str] = None
+    last_state_sync: Optional[float] = None
+    integration_enabled: bool = Field(default=False)
 
 
 class VoicePipelineConfig(BaseModel):
@@ -139,3 +160,26 @@ class TierSwitchEvent(BaseModel):
     trigger: str  # "qualification", "manual", "fallback"
     timestamp: float = Field(default_factory=time.time)
     qualification_score: Optional[float] = None
+
+
+class AgentTransition(BaseModel):
+    """Model for tracking agent transitions in voice calls"""
+    call_id: str
+    from_agent: str
+    to_agent: str
+    timestamp: float = Field(default_factory=time.time)
+    trigger: str  # "workflow", "escalation", "manual"
+    context_preserved: bool = True
+    transition_duration_ms: float = 0.0
+
+
+class VoiceAgentIntegrationContext(BaseModel):
+    """Context for voice and agent integration"""
+    call_id: str
+    voice_session_id: str
+    workflow_context_id: Optional[str] = None
+    sync_status: str = "synced"  # "synced", "pending", "failed"
+    last_sync_timestamp: float = Field(default_factory=time.time)
+    error_count: int = 0
+    fallback_active: bool = False
+    integration_metadata: Dict[str, Any] = Field(default_factory=dict)

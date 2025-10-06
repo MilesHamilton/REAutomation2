@@ -2,6 +2,7 @@
 .env
 .env.local
 .env.*.local
+credentials.json
 
 # Virtual environments
 .venv/
@@ -35,6 +36,7 @@ logs/
 
 # Temporary files
 /tasks-remaining
+/job-queue
 tmp/
 temp/
 

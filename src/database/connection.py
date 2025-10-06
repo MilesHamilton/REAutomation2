@@ -38,7 +38,6 @@ class DatabaseManager:
                 # PostgreSQL configuration for production
                 self.engine = create_async_engine(
                     self.database_url,
-                    poolclass=QueuePool,
                     pool_size=20,  # Max connections in pool
                     max_overflow=10,  # Additional connections beyond pool_size
                     pool_timeout=30,  # Timeout when getting connection from pool

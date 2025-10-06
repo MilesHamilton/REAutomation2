@@ -14,12 +14,23 @@ from dataclasses import dataclass, field
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
 
-from ..database.core import get_db
+from ..database.connection import get_database_session as get_db
 from ..database.monitoring_models import PerformanceMetrics
-from .models import MetricType, PerformanceData, SystemResourceMetrics
+from .models import MetricCategory, PerformanceMetric
 from .langsmith_client import get_langsmith_client
+from ..config import settings
 
 logger = logging.getLogger(__name__)
+
+# Create a simple MetricType enum for compatibility
+class MetricType:
+    GAUGE = "gauge"
+    COUNTER = "counter"
+    HISTOGRAM = "histogram"
+    
+    @property
+    def value(self):
+        return self
 
 
 @dataclass
@@ -34,15 +45,16 @@ class PerformanceMonitor:
     """Centralized performance monitoring and metrics collection"""
 
     def __init__(self):
-        self.enabled = True
+        # Check settings to determine if monitoring should be enabled
+        self.enabled = settings.performance_monitoring_enabled and settings.metrics_enabled
         self.metric_buffers: Dict[str, MetricBuffer] = defaultdict(MetricBuffer)
         self.active_timers: Dict[str, float] = {}
         self.call_counters: Dict[str, int] = defaultdict(int)
         self.error_counters: Dict[str, int] = defaultdict(int)
         self.response_times: Dict[str, deque] = defaultdict(lambda: deque(maxlen=100))
 
-        # System monitoring
-        self.system_metrics_enabled = True
+        # System monitoring - respect settings
+        self.system_metrics_enabled = settings.system_metrics_enabled and self.enabled
         self.memory_tracking_enabled = False
 
         # Background tasks
@@ -102,7 +114,7 @@ class PerformanceMonitor:
         self,
         metric_name: str,
         value: float,
-        metric_type: MetricType = MetricType.GAUGE,
+        metric_type: str = MetricType.GAUGE,
         tags: Optional[Dict[str, str]] = None,
         call_id: Optional[str] = None
     ):
@@ -111,10 +123,16 @@ class PerformanceMonitor:
             return
 
         try:
+            # Handle both string and MetricType inputs
+            if hasattr(metric_type, 'value'):
+                metric_type_str = metric_type.value
+            else:
+                metric_type_str = str(metric_type)
+                
             metric_data = {
                 "metric_name": metric_name,
                 "metric_value": value,
-                "metric_type": metric_type.value,
+                "metric_type": metric_type_str,
                 "tags": tags or {},
                 "call_id": call_id,
                 "recorded_at": datetime.utcnow(),
@@ -122,7 +140,7 @@ class PerformanceMonitor:
             }
 
             # Add to buffer
-            buffer_key = f"{metric_type.value}:{metric_name}"
+            buffer_key = f"{metric_type_str}:{metric_name}"
             self.metric_buffers[buffer_key].metrics.append(metric_data)
 
         except Exception as e:
@@ -254,6 +272,67 @@ class PerformanceMonitor:
             tokens_per_second = (tokens_used / duration_ms) * 1000
             self.record_metric("llm_tokens_per_second", tokens_per_second, MetricType.GAUGE, tags, call_id)
 
+    def record_gpu_metrics(
+        self,
+        gpu_id: int,
+        utilization_percent: float,
+        memory_used_mb: float,
+        memory_total_mb: float,
+        temperature_celsius: float,
+        power_draw_watts: Optional[float] = None
+    ):
+        """Record GPU performance metrics"""
+        tags = {"gpu_id": str(gpu_id)}
+
+        # Utilization
+        self.record_metric("gpu_utilization_percent", utilization_percent, MetricType.GAUGE, tags)
+
+        # Memory
+        self.record_metric("gpu_memory_used_mb", memory_used_mb, MetricType.GAUGE, tags)
+        self.record_metric("gpu_memory_total_mb", memory_total_mb, MetricType.GAUGE, tags)
+
+        memory_utilization = (memory_used_mb / memory_total_mb * 100) if memory_total_mb > 0 else 0
+        self.record_metric("gpu_memory_utilization_percent", memory_utilization, MetricType.GAUGE, tags)
+
+        # Temperature
+        self.record_metric("gpu_temperature_celsius", temperature_celsius, MetricType.GAUGE, tags)
+
+        # Power draw (if available)
+        if power_draw_watts is not None:
+            self.record_metric("gpu_power_draw_watts", power_draw_watts, MetricType.GAUGE, tags)
+
+    def record_streaming_metrics(
+        self,
+        time_to_first_chunk_ms: float,
+        total_chunks: int,
+        total_tokens: int,
+        total_duration_ms: float,
+        throughput_tokens_per_second: float,
+        call_id: Optional[str] = None
+    ):
+        """Record streaming response metrics"""
+        tags = {"source": "streaming"}
+
+        # Time to first chunk (TTFC) - critical for perceived latency
+        self.record_metric("streaming_ttfc_ms", time_to_first_chunk_ms, MetricType.HISTOGRAM, tags, call_id)
+
+        # Total chunks
+        self.record_metric("streaming_chunks_total", total_chunks, MetricType.HISTOGRAM, tags, call_id)
+
+        # Total tokens
+        self.record_metric("streaming_tokens_total", total_tokens, MetricType.HISTOGRAM, tags, call_id)
+
+        # Duration
+        self.record_metric("streaming_duration_ms", total_duration_ms, MetricType.HISTOGRAM, tags, call_id)
+
+        # Throughput
+        self.record_metric("streaming_throughput_tokens_per_second", throughput_tokens_per_second, MetricType.GAUGE, tags, call_id)
+
+        # Chunks per second
+        if total_duration_ms > 0:
+            chunks_per_second = (total_chunks / total_duration_ms) * 1000
+            self.record_metric("streaming_chunks_per_second", chunks_per_second, MetricType.GAUGE, tags, call_id)
+
     # System Metrics Collection
     async def _system_metrics_collector(self):
         """Background task to collect system metrics"""
@@ -262,13 +341,13 @@ class PerformanceMonitor:
                 if self.system_metrics_enabled:
                     await self._collect_system_metrics()
 
-                await asyncio.sleep(30)  # Collect every 30 seconds
+                await asyncio.sleep(120)  # Collect every 2 minutes (reduced frequency)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Error in system metrics collector: {e}")
-                await asyncio.sleep(60)  # Wait longer on error
+                await asyncio.sleep(300)  # Wait 5 minutes on error
 
     async def _collect_system_metrics(self):
         """Collect system resource metrics"""
@@ -301,6 +380,23 @@ class PerformanceMonitor:
             self.record_metric("process_memory_mb", process.memory_info().rss / 1024 / 1024, MetricType.GAUGE)
             self.record_metric("process_cpu_percent", process.cpu_percent(), MetricType.GAUGE)
 
+            # GPU metrics (if available)
+            try:
+                from ..llm.gpu_manager import gpu_manager
+                gpu_metrics = await gpu_manager.get_metrics()
+
+                if gpu_metrics and gpu_metrics.get("available", False):
+                    self.record_gpu_metrics(
+                        gpu_id=0,  # Primary GPU
+                        utilization_percent=gpu_metrics.get("utilization_percent", 0),
+                        memory_used_mb=gpu_metrics.get("used_memory_mb", 0),
+                        memory_total_mb=gpu_metrics.get("total_memory_mb", 0),
+                        temperature_celsius=gpu_metrics.get("temperature", 0),
+                        power_draw_watts=gpu_metrics.get("power_draw", None)
+                    )
+            except Exception as e:
+                logger.debug(f"GPU metrics not available: {e}")
+
             # Python-specific memory tracking
             if self.memory_tracking_enabled:
                 current, peak = tracemalloc.get_traced_memory()
@@ -316,13 +412,13 @@ class PerformanceMonitor:
         while not self._shutdown_event.is_set():
             try:
                 await self._flush_all_metrics()
-                await asyncio.sleep(60)  # Flush every minute
+                await asyncio.sleep(180)  # Flush every 3 minutes (reduced frequency)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Error in metric flusher: {e}")
-                await asyncio.sleep(120)  # Wait longer on error
+                await asyncio.sleep(300)  # Wait 5 minutes on error
 
     async def _flush_all_metrics(self):
         """Flush all metric buffers to database"""
@@ -340,7 +436,7 @@ class PerformanceMonitor:
             logger.debug(f"Flushed {total_flushed} metrics to database")
 
     async def _flush_buffer(self, buffer: MetricBuffer) -> int:
-        """Flush a specific metric buffer"""
+        """Flush a specific metric buffer with proper async database operations"""
         if len(buffer.metrics) == 0:
             return 0
 
@@ -349,27 +445,38 @@ class PerformanceMonitor:
             db_records = []
             metrics_to_flush = []
 
-            while buffer.metrics and len(metrics_to_flush) < 100:  # Batch size
+            # Batch size reduced to prevent overwhelming the database
+            while buffer.metrics and len(metrics_to_flush) < 50:  # Smaller batch size
                 metrics_to_flush.append(buffer.metrics.popleft())
 
             for metric_data in metrics_to_flush:
+                # Generate required IDs for the database model
+                from ..database.monitoring_models import create_metric_id
+                
                 db_record = PerformanceMetrics(
+                    metric_id=create_metric_id(
+                        metric_data.get("metric_type", "gauge"), 
+                        metric_data["metric_name"], 
+                        metric_data["recorded_at"]
+                    ),
+                    metric_category=metric_data.get("metric_type", "gauge"),
                     metric_name=metric_data["metric_name"],
                     metric_value=metric_data["metric_value"],
-                    metric_type=metric_data["metric_type"],
                     call_id=metric_data.get("call_id"),
-                    tags=metric_data.get("tags", {}),
+                    aggregation_level="call" if metric_data.get("call_id") else "system",
+                    time_window="real_time",
                     recorded_at=metric_data["recorded_at"],
-                    source=metric_data.get("source", "unknown")
+                    time_bucket=metric_data["recorded_at"].replace(second=0, microsecond=0),  # Round to minute
+                    additional_metadata=metric_data.get("tags", {})
                 )
                 db_records.append(db_record)
 
-            # Bulk insert to database
+            # Bulk insert to database using proper async context manager
             if db_records:
-                async for db in get_db():
+                from ..database.connection import db_manager
+                async with db_manager.get_session() as db:
                     db.add_all(db_records)
-                    db.commit()
-                    break
+                    await db.commit()
 
             buffer.last_flush = time.time()
             return len(db_records)

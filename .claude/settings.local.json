@@ -10,7 +10,13 @@
       "Bash(py -m py_compile:*)",
       "Bash(./.venv/Scripts/python.exe -m py_compile:*)",
       "Bash(cat:*)",
-      "Bash(alembic revision:*)"
+      "Bash(alembic revision:*)",
+      "Bash(python3 -m alembic revision:*)",
+      "Bash(python3:*)",
+      "Bash(awk:*)",
+      "Bash(xargs:*)",
+      "Bash(grep:*)",
+      "Read(//home/miles/**)"
     ],
     "deny": [],
     "ask": []

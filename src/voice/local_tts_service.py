@@ -9,6 +9,9 @@ from pipecat.frames.frames import TextFrame, TTSAudioRawFrame, TTSStartedFrame, 
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.ai_services import TTSService
 
+from .piper_integration import PiperEngine, PIPER_AVAILABLE
+from ..config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,11 +42,30 @@ class TTSEngine:
     async def _initialize_piper(self, **kwargs):
         """Initialize Piper TTS engine"""
         try:
-            import piper
-            # Mock Piper initialization for testing
-            self._model = MockPiperModel()
-        except ImportError:
-            logger.warning("Piper not available, using mock")
+            if not PIPER_AVAILABLE:
+                logger.warning("Piper not available, using mock")
+                self._model = MockPiperModel()
+                return
+
+            # Initialize real PiperEngine
+            self._model = PiperEngine(
+                models_path=kwargs.get('models_path', settings.piper_models_path),
+                default_voice=kwargs.get('default_voice', settings.piper_default_voice),
+                use_gpu=kwargs.get('use_gpu', settings.piper_use_gpu),
+                prewarm=kwargs.get('prewarm', settings.piper_prewarm_model),
+                speaker_id=kwargs.get('speaker_id', settings.piper_speaker_id)
+            )
+
+            # Initialize the engine
+            success = await self._model.initialize()
+            if not success:
+                logger.warning("PiperEngine initialization failed, using mock")
+                self._model = MockPiperModel()
+            else:
+                logger.info(f"PiperEngine initialized with {len(self._model.get_available_voices())} voices")
+
+        except Exception as e:
+            logger.warning(f"Piper initialization error: {e}, using mock")
             self._model = MockPiperModel()
 
     async def _initialize_coqui(self, **kwargs):
@@ -65,10 +87,35 @@ class TTSEngine:
         if not self._is_initialized:
             raise RuntimeError("TTS engine not initialized")
 
-        return await self._model.synthesize(text, voice_id)
+        # Handle PiperEngine vs mock differently
+        if isinstance(self._model, PiperEngine):
+            # PiperEngine returns numpy array
+            audio_array = await self._model.synthesize(text, voice_id)
+            if audio_array is not None:
+                # Convert float32 numpy array to 16-bit PCM bytes
+                return self._numpy_to_pcm_bytes(audio_array)
+            return None
+        else:
+            # Mock model returns bytes directly
+            return await self._model.synthesize(text, voice_id)
+
+    def _numpy_to_pcm_bytes(self, audio_array: np.ndarray) -> bytes:
+        """Convert numpy float32 array to 16-bit PCM bytes"""
+        # Ensure array is float32 and normalized to -1.0 to 1.0
+        if audio_array.dtype != np.float32:
+            audio_array = audio_array.astype(np.float32)
+
+        # Convert to 16-bit signed integers
+        audio_int16 = (audio_array * 32767).astype(np.int16)
+        return audio_int16.tobytes()
 
     def get_available_voices(self) -> List[str]:
         """Get available voices for the engine"""
+        # Get from actual engine if available
+        if isinstance(self._model, PiperEngine):
+            return self._model.get_available_voices()
+
+        # Fallback to defaults
         if self._engine_type == "piper":
             return ["en_US-lessac-medium", "en_US-amy-medium", "en_US-ryan-medium"]
         elif self._engine_type == "coqui":
@@ -174,21 +221,30 @@ class LocalTTSService(TTSService):
     async def _initialize_piper(self):
         """Initialize Piper TTS engine"""
         try:
-            import piper
+            if not PIPER_AVAILABLE:
+                logger.warning("Piper not available, using mock")
+                self._tts_engine = MockTTSEngine()
+                return
 
-            # Load Piper model (you'd need to download models first)
-            model_path = f"./models/piper/{self.voice}.onnx"
-            config_path = f"./models/piper/{self.voice}.onnx.json"
+            # Initialize PiperEngine
+            self._tts_engine = PiperEngine(
+                models_path=settings.piper_models_path,
+                default_voice=self.voice,
+                use_gpu=settings.piper_use_gpu,
+                prewarm=settings.piper_prewarm_model,
+                speaker_id=settings.piper_speaker_id
+            )
 
-            self._tts_engine = piper.PiperVoice.load(model_path, config_path)
-            logger.info(f"Piper model loaded: {self.voice}")
+            # Initialize the engine
+            success = await self._tts_engine.initialize()
+            if not success:
+                logger.warning("PiperEngine initialization failed, using mock")
+                self._tts_engine = MockTTSEngine()
+            else:
+                logger.info(f"Piper TTS initialized with voice: {self.voice}")
 
-        except ImportError:
-            logger.error("Piper TTS not installed. Install with: pip install piper-tts")
-            raise
         except Exception as e:
-            logger.error(f"Failed to load Piper model: {e}")
-            # Fallback to mock implementation for development
+            logger.error(f"Failed to initialize Piper: {e}")
             self._tts_engine = MockTTSEngine()
             logger.warning("Using mock TTS engine for development")
 
@@ -266,35 +322,46 @@ class LocalTTSService(TTSService):
             if isinstance(self._tts_engine, MockTTSEngine):
                 return await self._synthesize_mock(text)
 
-            # Run Piper synthesis in executor to avoid blocking
-            audio_data = await asyncio.get_event_loop().run_in_executor(
-                None,
-                self._piper_synthesize_sync,
-                text
-            )
+            # Use PiperEngine for synthesis
+            if isinstance(self._tts_engine, PiperEngine):
+                # Check if streaming is enabled
+                if settings.piper_enable_streaming:
+                    # Use streaming synthesis for lower latency
+                    chunks = await self._tts_engine.synthesize_streaming(
+                        text,
+                        voice_name=self.voice,
+                        chunk_size_ms=settings.piper_chunk_size_ms
+                    )
 
-            return audio_data
+                    if chunks:
+                        # Combine all chunks into single audio
+                        combined_audio = np.concatenate(chunks)
+                        # Convert to PCM bytes
+                        return self._numpy_to_pcm_bytes(combined_audio)
+                else:
+                    # Standard synthesis
+                    audio_array = await self._tts_engine.synthesize(text, voice_name=self.voice)
+                    if audio_array is not None:
+                        return self._numpy_to_pcm_bytes(audio_array)
+
+            return None
 
         except Exception as e:
             logger.error(f"Piper synthesis error: {e}")
             return None
 
-    def _piper_synthesize_sync(self, text: str) -> bytes:
-        """Synchronous Piper synthesis (runs in executor)"""
-        try:
-            # Synthesize with Piper
-            wav_data = io.BytesIO()
-            self._tts_engine.synthesize(text, wav_data)
+    def _numpy_to_pcm_bytes(self, audio_array: np.ndarray) -> bytes:
+        """Convert numpy float32 array to 16-bit PCM bytes"""
+        # Ensure array is float32 and normalized to -1.0 to 1.0
+        if audio_array.dtype != np.float32:
+            audio_array = audio_array.astype(np.float32)
 
-            # Convert WAV to raw PCM
-            wav_data.seek(0)
-            with wave.open(wav_data, 'rb') as wav_file:
-                frames = wav_file.readframes(-1)
-                return frames
+        # Clip to prevent overflow
+        audio_array = np.clip(audio_array, -1.0, 1.0)
 
-        except Exception as e:
-            logger.error(f"Piper sync synthesis error: {e}")
-            return b""
+        # Convert to 16-bit signed integers
+        audio_int16 = (audio_array * 32767).astype(np.int16)
+        return audio_int16.tobytes()
 
     async def _synthesize_with_coqui(self, text: str) -> Optional[bytes]:
         """Synthesize with Coqui TTS"""
@@ -356,6 +423,11 @@ class LocalTTSService(TTSService):
         """Stop the TTS service"""
         try:
             self._is_initialized = False
+
+            # Cleanup PiperEngine if present
+            if isinstance(self._tts_engine, PiperEngine):
+                await self._tts_engine.cleanup()
+
             self._tts_engine = None
             await super().stop()
             logger.info("Local TTS service stopped")
